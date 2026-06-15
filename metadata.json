@@ -1,0 +1,6 @@
+{
+  "name": "Epsilon War AP Tracker",
+  "description": "Ability point tracker and automated player ability logs manager for the Epsilion War MMORPG text game, featuring an integrated Telegram bot integrator and sandbox simulator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
