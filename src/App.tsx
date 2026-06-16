@@ -29,18 +29,42 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
+  const [selectedChatId, setSelectedChatId] = useState<string>(
+    localStorage.getItem("selected_chat_id") || "default"
+  );
+  const [chatList, setChatList] = useState<{ id: string; label: string; playerCount: number; currentTurn: number }[]>([]);
+  const [authError, setAuthError] = useState<boolean>(false);
+  const [passwordInput, setPasswordInput] = useState<string>("");
+  const [passwordError, setPasswordError] = useState<string>("");
+
+  const authenticatedFetch = async (url: string, options: RequestInit = {}) => {
+    const token = localStorage.getItem("dashboard_token") || "";
+    const headers: Record<string, string> = {
+      ...(options.headers as any),
+      "x-dashboard-token": token,
+    };
+    return fetch(url, { ...options, headers });
+  };
+
   // Sync state with backend database
   const loadState = async (isSilent = false) => {
     if (!isSilent) setLoading(true);
     try {
-      const res = await fetch('/api/state');
+      const res = await authenticatedFetch(`/api/state?chatId=${encodeURIComponent(selectedChatId)}`);
+      if (res.status === 401) {
+        setAuthError(true);
+        setLoading(false);
+        return;
+      }
       if (res.ok) {
+        setAuthError(false);
         const data = await res.json();
         setPlayers(data.players || []);
         setHistory(data.history || []);
         setSettings(data.settings || null);
         setCurrentTurn(data.currentTurn || 0);
         setHasBotToken(data.hasBotToken || false);
+        setChatList(data.chatList || []);
       }
     } catch (err) {
       // Avoid printing noisy errors during active dev server restarts
@@ -58,11 +82,11 @@ export default function App() {
     // Poll state silently every 5 seconds to keep synced with live Telegram Bot updates
     const timer = setInterval(() => loadState(true), 5000);
     return () => clearInterval(timer);
-  }, []);
+  }, [selectedChatId]);
 
   const handleUpdatePlayer = async (player: Player) => {
     try {
-      const res = await fetch('/api/players', {
+      const res = await authenticatedFetch(`/api/players?chatId=${encodeURIComponent(selectedChatId)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(player),
@@ -77,7 +101,7 @@ export default function App() {
 
   const handleAddPlayer = async (playerData: any) => {
     try {
-      const res = await fetch('/api/players', {
+      const res = await authenticatedFetch(`/api/players?chatId=${encodeURIComponent(selectedChatId)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(playerData),
@@ -92,7 +116,9 @@ export default function App() {
 
   const handleDeletePlayer = async (id: string) => {
     try {
-      const res = await fetch(`/api/players/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const res = await authenticatedFetch(`/api/players/${encodeURIComponent(id)}?chatId=${encodeURIComponent(selectedChatId)}`, {
+        method: 'DELETE'
+      });
       if (res.ok) {
         await loadState(true);
       }
@@ -101,11 +127,9 @@ export default function App() {
     }
   };
 
-
-
   const handleParseLog = async (logText: string) => {
     try {
-      const res = await fetch('/api/parse', {
+      const res = await authenticatedFetch(`/api/parse?chatId=${encodeURIComponent(selectedChatId)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ logText }),
@@ -128,7 +152,7 @@ export default function App() {
     if (!window.confirm(confirmText)) return;
 
     try {
-      const res = await fetch('/api/reset', {
+      const res = await authenticatedFetch(`/api/reset?chatId=${encodeURIComponent(selectedChatId)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ option }),
@@ -143,7 +167,7 @@ export default function App() {
 
   const handleSaveSettings = async (updatedSettings: Settings) => {
     try {
-      const res = await fetch('/api/settings', {
+      const res = await authenticatedFetch(`/api/settings?chatId=${encodeURIComponent(selectedChatId)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updatedSettings),
@@ -158,14 +182,14 @@ export default function App() {
 
   const handleSimulateBotMessage = async (text: string): Promise<{ reply: string; buttons?: { text: string; callback_data: string }[] }> => {
     try {
-      const res = await fetch('/api/simulate-bot', {
+      const res = await authenticatedFetch(`/api/simulate-bot?chatId=${encodeURIComponent(selectedChatId)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
       });
       if (res.ok) {
         const data = await res.json();
-        return data; // returns { reply, buttons }
+        return data;
       }
     } catch (err) {
       console.error('Simulated message failed:', err);
@@ -178,6 +202,15 @@ export default function App() {
     await loadState();
   };
 
+  const handleLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!passwordInput.trim()) return;
+    localStorage.setItem("dashboard_token", passwordInput);
+    setPasswordInput("");
+    setPasswordError("");
+    loadState();
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col items-center justify-center font-sans">
@@ -185,6 +218,45 @@ export default function App() {
         <h2 className="text-sm font-semibold text-zinc-300 font-display uppercase tracking-widest animate-pulse">
           Loading war archives...
         </h2>
+      </div>
+    );
+  }
+
+  if (authError) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col items-center justify-center font-sans px-4">
+        <div className="max-w-md w-full bg-zinc-900/50 border border-zinc-805/85 rounded-2xl p-8 backdrop-blur-md shadow-2xl">
+          <div className="flex flex-col items-center gap-3 mb-6">
+            <div className="h-12 w-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-indigo-700 flex items-center justify-center border border-indigo-400/30">
+              <Swords className="h-6 w-6 text-white animate-pulse" />
+            </div>
+            <h2 className="text-xl font-bold tracking-tight text-zinc-100 font-display">
+              Dashboard Protected
+            </h2>
+            <p className="text-xs text-zinc-500 font-medium text-center">
+              Please enter your dashboard access password to proceed.
+            </p>
+          </div>
+          
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <input
+                type="password"
+                placeholder="Enter password..."
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-indigo-500 text-zinc-100 placeholder-zinc-600 transition-all font-mono"
+                autoFocus
+              />
+            </div>
+            <button
+              type="submit"
+              className="w-full bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-zinc-100 rounded-xl py-3 text-sm font-semibold transition-all shadow-lg shadow-indigo-600/10 cursor-pointer"
+            >
+              Unlock HUD
+            </button>
+          </form>
+        </div>
       </div>
     );
   }
@@ -209,6 +281,28 @@ export default function App() {
 
           {/* HUD Battle Status Details */}
           <div className="flex items-center gap-4">
+            {/* Session Selector */}
+            {chatList.length > 0 && (
+              <div className="flex items-center gap-2 bg-zinc-950 px-3.5 py-1.5 rounded-xl border border-zinc-900">
+                <span className="text-[9px] text-zinc-500 font-bold uppercase tracking-wider hidden sm:inline">Session:</span>
+                <select
+                  value={selectedChatId}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setSelectedChatId(val);
+                    localStorage.setItem("selected_chat_id", val);
+                  }}
+                  className="bg-transparent border-none text-xs text-indigo-400 font-black font-mono focus:outline-none cursor-pointer pr-1"
+                >
+                  {chatList.map((chat) => (
+                    <option key={chat.id} value={chat.id} className="bg-zinc-950 text-zinc-300 font-mono text-xs">
+                      {chat.label} ({chat.playerCount}p)
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             <div className="hidden md:flex items-center gap-3 bg-zinc-950 px-3.5 py-1.5 rounded-xl border border-zinc-900">
               <Activity className="h-3.5 w-3.5 text-indigo-400 animate-pulse" />
               <div className="text-right">

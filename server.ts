@@ -27,14 +27,22 @@ const defaultSettings: Settings = {
   },
 };
 
-let dbState: DatabaseState = {
-  players: [],
-  history: [],
-  settings: defaultSettings,
-  currentTurn: 0,
-  processedTurns: [],
-  language: 'en'
-};
+let dbState: Record<string, DatabaseState> = {};
+
+function getChatState(chatId: string | number): DatabaseState {
+  const cid = String(chatId);
+  if (!dbState[cid]) {
+    dbState[cid] = {
+      players: [],
+      history: [],
+      settings: JSON.parse(JSON.stringify(defaultSettings)),
+      currentTurn: 0,
+      processedTurns: [],
+      language: 'en'
+    };
+  }
+  return dbState[cid];
+}
 
 // Ensure database file exists
 function loadDB() {
@@ -45,14 +53,6 @@ function loadDB() {
     if (fs.existsSync(DB_FILE)) {
       const content = fs.readFileSync(DB_FILE, "utf-8");
       const parsed = JSON.parse(content);
-      dbState = {
-        players: parsed.players || [],
-        history: parsed.history || [],
-        settings: parsed.settings || defaultSettings,
-        currentTurn: parsed.currentTurn || 0,
-        processedTurns: parsed.processedTurns || [],
-        language: parsed.language || 'en'
-      };
       
       const blacklistWords = [
         'ход', 'turn', 'раунд', 'round', 'бой', 'battle', 
@@ -64,13 +64,54 @@ function loadDB() {
         'эффект', 'цель', 'цели', 'способност', 'действие', 'урон', 'лечение', 
         'восстановление', 'активн', 'пассивн'
       ];
-      
-      dbState.players = dbState.players.filter(p => {
-        const lower = p.name.toLowerCase();
-        return !blacklistWords.some(word => lower.includes(word));
-      });
-      console.log(`Database loaded successfully with ${dbState.players.length} players after filtering.`);
+
+      // Auto-migrate legacy format (single state) to multi-chat mapping
+      if (parsed.players || parsed.settings) {
+        dbState = {
+          default: {
+            players: parsed.players || [],
+            history: parsed.history || [],
+            settings: parsed.settings || defaultSettings,
+            currentTurn: parsed.currentTurn || 0,
+            processedTurns: parsed.processedTurns || [],
+            language: parsed.language || 'en'
+          }
+        };
+      } else {
+        dbState = {};
+        for (const cid in parsed) {
+          const chatData = parsed[cid];
+          dbState[cid] = {
+            players: chatData.players || [],
+            history: chatData.history || [],
+            settings: chatData.settings || defaultSettings,
+            currentTurn: chatData.currentTurn || 0,
+            processedTurns: chatData.processedTurns || [],
+            language: chatData.language || 'en'
+          };
+        }
+      }
+
+      // Filter blacklisted words from all loaded states
+      for (const cid in dbState) {
+        dbState[cid].players = dbState[cid].players.filter(p => {
+          const lower = p.name.toLowerCase();
+          return !blacklistWords.some(word => lower.includes(word));
+        });
+      }
+      console.log(`Database loaded successfully with ${Object.keys(dbState).length} chat states.`);
     } else {
+      // Seed with default sandbox state
+      dbState = {
+        default: {
+          players: [],
+          history: [],
+          settings: JSON.parse(JSON.stringify(defaultSettings)),
+          currentTurn: 0,
+          processedTurns: [],
+          language: 'en'
+        }
+      };
       saveDB();
       console.log("Database initialized with default seed data.");
     }
@@ -151,7 +192,8 @@ function parseAbilityCost(costStr: string) {
 }
 
 // Global Core parser function
-function parseCombatLog(logText: string): { turnNumber: number; addedPoints: boolean; parsedEvents: any[] } {
+function parseCombatLog(logText: string, state: DatabaseState): { turnNumber: number; addedPoints: boolean; parsedEvents: any[] } {
+  const dbState = state;
   let matchedTurn = 0;
   let pointsWereAdded = false;
   const parsedEvents: any[] = [];
@@ -586,14 +628,25 @@ function parseCombatLog(logText: string): { turnNumber: number; addedPoints: boo
                 detail: `Blocked attack from ${attackerPlayer.name} ➡️ +1 🛡`
               });
             }
-          } else if (outcomeLower.includes("пробивает блок") || outcomeLower.includes("критическ") || outcomeLower.includes("🥊")) {
-            // Critical Strike or Block breaker: Attacker gets 🥊
+          } else if (outcomeLower.includes("пробивает блок") || outcomeLower.includes("пробил блок") || outcomeLower.includes("пробила блок")) {
+            // Block break: Attacker gets 🥊 and 🌬
             attackerPlayer.points['🥊'] = (attackerPlayer.points['🥊'] || 0) + 1;
+            attackerPlayer.points['🌬'] = (attackerPlayer.points['🌬'] || 0) + 1;
             attackerPlayer.updatedAt = new Date().toISOString();
             parsedEvents.push({
               playerName: attackerPlayer.name,
               actionType: 'point_gain',
-              detail: `Critical or Block-breaker strike ➡️ +1 🥊`
+              detail: `Broke defender's block ➡️ +1 🥊 and +1 🌬`
+            });
+          } else if (outcomeLower.includes("критическ") || outcomeLower.includes("🥊")) {
+            // Critical strike (successful): Attacker gets 🥊 and 🗡
+            attackerPlayer.points['🥊'] = (attackerPlayer.points['🥊'] || 0) + 1;
+            attackerPlayer.points['🗡'] = (attackerPlayer.points['🗡'] || 0) + 1;
+            attackerPlayer.updatedAt = new Date().toISOString();
+            parsedEvents.push({
+              playerName: attackerPlayer.name,
+              actionType: 'point_gain',
+              detail: `Landed critical hit successfully ➡️ +1 🥊 and +1 🗡`
             });
           } else if (outcomeLower.includes("наносит") || outcomeLower.includes("нанес") || outcomeLower.includes("нанесла") || outcomeLower.includes("урон")) {
             // Hit deals damage: Attacker gets 🗡
@@ -642,37 +695,74 @@ function parseCombatLog(logText: string): { turnNumber: number; addedPoints: boo
 // Express API Route Enforcers
 // ----------------------------------------------------
 
+// Authentication and Security Check Middleware for /api/*
+app.use("/api", (req, res, next) => {
+  if (req.path === "/health") {
+    return next();
+  }
+  const password = process.env.DASHBOARD_PASSWORD;
+  if (!password) {
+    return next();
+  }
+  const token = req.headers["x-dashboard-token"] || req.query.token;
+  if (token === password) {
+    return next();
+  }
+  res.status(401).json({ error: "Unauthorized" });
+});
+
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
 app.get("/api/state", (req, res) => {
+  const chatId = (req.query.chatId as string) || "default";
+  const state = getChatState(chatId);
+  
+  // Build active chats list
+  const chatList = Object.keys(dbState).map(cid => {
+    const s = dbState[cid];
+    let label = cid === "default" ? "Simulated Sandbox" : `Chat #${cid}`;
+    return {
+      id: cid,
+      label,
+      playerCount: s.players.length,
+      currentTurn: s.currentTurn
+    };
+  });
+
   res.json({
-    ...dbState,
+    ...state,
+    chatId,
+    chatList,
     hasBotToken: !!process.env.TELEGRAM_BOT_TOKEN
   });
 });
 
 app.post("/api/settings", (req, res) => {
+  const chatId = (req.body.chatId as string) || (req.query.chatId as string) || "default";
+  const state = getChatState(chatId);
   const { startingPoints } = req.body;
   if (startingPoints) {
-    dbState.settings = {
+    state.settings = {
       startingPoints,
     };
     saveDB();
-    return res.json({ success: true, settings: dbState.settings });
+    return res.json({ success: true, settings: state.settings });
   }
   res.status(400).json({ error: "Invalid settings format" });
 });
 
 app.post("/api/players", (req, res) => {
+  const chatId = (req.body.chatId as string) || (req.query.chatId as string) || "default";
+  const state = getChatState(chatId);
   const { name, team, level, hp, points, isAlive } = req.body;
   if (!name) {
     return res.status(400).json({ error: "Player name is required" });
   }
 
   const cleanName = cleanPlayerName(name);
-  let player = dbState.players.find(p => p.id === cleanName);
+  let player = state.players.find(p => p.id === cleanName);
 
   if (!player) {
     player = {
@@ -683,16 +773,16 @@ app.post("/api/players", (req, res) => {
       hp: hp || "100/100",
       isAlive: isAlive !== undefined ? !!isAlive : true,
       points: points || {
-        '🗡': dbState.settings.startingPoints?.['🗡'] ?? 0,
-        '🛡': dbState.settings.startingPoints?.['🛡'] ?? 0,
-        '🥊': dbState.settings.startingPoints?.['🥊'] ?? 0,
-        '🌬': dbState.settings.startingPoints?.['🌬'] ?? 0,
-        '⚡️': dbState.settings.startingPoints?.['⚡️'] ?? 0,
-        '🤺': dbState.settings.startingPoints?.['🤺'] ?? 0,
+        '🗡': state.settings.startingPoints?.['🗡'] ?? 0,
+        '🛡': state.settings.startingPoints?.['🛡'] ?? 0,
+        '🥊': state.settings.startingPoints?.['🥊'] ?? 0,
+        '🌬': state.settings.startingPoints?.['🌬'] ?? 0,
+        '⚡️': state.settings.startingPoints?.['⚡️'] ?? 0,
+        '🤺': state.settings.startingPoints?.['🤺'] ?? 0,
       },
       updatedAt: new Date().toISOString()
     };
-    dbState.players.push(player);
+    state.players.push(player);
   } else {
     // Edit existing
     player.name = cleanName;
@@ -709,19 +799,23 @@ app.post("/api/players", (req, res) => {
 });
 
 app.delete("/api/players/:id", (req, res) => {
+  const chatId = (req.query.chatId as string) || "default";
+  const state = getChatState(chatId);
   const { id } = req.params;
-  dbState.players = dbState.players.filter(p => p.id !== id);
+  state.players = state.players.filter(p => p.id !== id);
   saveDB();
   res.json({ success: true });
 });
 
 app.post("/api/parse", (req, res) => {
+  const chatId = (req.body.chatId as string) || (req.query.chatId as string) || "default";
+  const state = getChatState(chatId);
   const { logText } = req.body;
   if (!logText) {
     return res.status(400).json({ error: "No combat log text provided" });
   }
 
-  const result = parseCombatLog(logText);
+  const result = parseCombatLog(logText, state);
 
   // Add historical record
   const logEntry: BattleLogEntry = {
@@ -731,9 +825,9 @@ app.post("/api/parse", (req, res) => {
     rawText: logText,
     parsedEvents: result.parsedEvents
   };
-  dbState.history.unshift(logEntry);
-  if (dbState.history.length > 30) {
-    dbState.history.pop();
+  state.history.unshift(logEntry);
+  if (state.history.length > 30) {
+    state.history.pop();
   }
   saveDB();
 
@@ -742,20 +836,22 @@ app.post("/api/parse", (req, res) => {
     turnNumber: result.turnNumber,
     addedPoints: result.addedPoints,
     parsedEvents: result.parsedEvents,
-    state: dbState
+    state
   });
 });
 
 app.post("/api/reset", (req, res) => {
+  const chatId = (req.body.chatId as string) || (req.query.chatId as string) || "default";
+  const state = getChatState(chatId);
   const { option } = req.body; // "all", "pointsOnly", "players"
   
   if (option === "all") {
-    dbState.players = [];
-    dbState.history = [];
-    dbState.currentTurn = 0;
-    dbState.processedTurns = [];
+    state.players = [];
+    state.history = [];
+    state.currentTurn = 0;
+    state.processedTurns = [];
   } else if (option === "pointsOnly") {
-    for (const player of dbState.players) {
+    for (const player of state.players) {
       player.points = {
         '🗡': 0,
         '🛡': 0,
@@ -765,42 +861,46 @@ app.post("/api/reset", (req, res) => {
         '🤺': 0
       };
     }
-    dbState.currentTurn = 0;
-    dbState.processedTurns = [];
+    state.currentTurn = 0;
+    state.processedTurns = [];
   } else if (option === "players") {
-    dbState.players = [];
+    state.players = [];
   }
   
   saveDB();
-  res.json({ success: true, state: dbState });
+  res.json({ success: true, state });
 });
 
 // ----------------------------------------------------
 // Telegram Bot Simulator Sandbox Trigger
 // ----------------------------------------------------
 app.post("/api/simulate-bot", async (req, res) => {
-  const { text, userId, username } = req.body;
+  const { text, userId, username, chatId } = req.body;
   if (!text) {
     return res.status(400).json({ error: "No text message provided" });
   }
 
-  const responseObj = await processBotMessageWithOptions(text, userId || 12345, username || "PlayerSimulator");
+  const responseObj = await processBotMessageWithOptions(text, chatId || "default", userId || 12345, username || "PlayerSimulator");
   res.json(responseObj);
 });
 
 // ----------------------------------------------------
 // Shared Bot Message Handling Logic
 // ----------------------------------------------------
-async function processBotMessage(text: string, userId: number, username: string): Promise<string> {
-  const resObj = await processBotMessageWithOptions(text, userId, username);
+async function processBotMessage(text: string, chatId: string | number, userId: number, username: string): Promise<string> {
+  const resObj = await processBotMessageWithOptions(text, chatId, userId, username);
   return resObj.reply;
 }
 
 async function processBotMessageWithOptions(
   text: string, 
+  chatId: string | number,
   userId: number, 
   username: string
 ): Promise<{ reply: string; buttons?: { text: string; callback_data: string }[] }> {
+  const cid = String(chatId);
+  const state = getChatState(cid);
+  const dbState = state; // Local alias so we don't have to rewrite internal dbState references
   const trimmed = text.trim();
   const command = trimmed.split(/\s+/)[0].toLowerCase();
 
@@ -969,7 +1069,7 @@ Fallen Combatants: <b>${dead}</b>`
 
   // Treat as raw combat log
   if (trimmed.includes("Ход") || trimmed.includes("использует комбинацию") || trimmed.includes("Защитники") || trimmed.includes("Нападающие") || trimmed.includes("vs")) {
-    const result = parseCombatLog(trimmed);
+    const result = parseCombatLog(trimmed, dbState);
     
     // Create entry in log history
     const logEntry: BattleLogEntry = {
@@ -1185,7 +1285,7 @@ async function runTelegramPollingBot() {
             console.log(`[TelegramBot] message received from ${fromUser}: ${text.substring(0, 40)}...`);
             
             // Process message details
-            const responseObj = await processBotMessageWithOptions(text, fromId, fromUser);
+            const responseObj = await processBotMessageWithOptions(text, chatId, fromId, fromUser);
 
             // Send back simple response using Fetch
             const sendUrl = `https://api.telegram.org/bot${token}/sendMessage`;
@@ -1218,7 +1318,7 @@ async function runTelegramPollingBot() {
             const fromId = cb.from?.id || 0;
 
             if (chatId) {
-              const responseObj = await processBotMessageWithOptions(dataCmd, fromId, fromUser);
+              const responseObj = await processBotMessageWithOptions(dataCmd, chatId, fromId, fromUser);
               const sendUrl = `https://api.telegram.org/bot${token}/sendMessage`;
               const sendBody: any = {
                 chat_id: chatId,
