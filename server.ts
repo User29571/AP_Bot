@@ -4,6 +4,13 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { Player, BattleLogEntry, Settings, DatabaseState } from "./src/types";
+import {
+  handleEquipCommand,
+  handleEquipCallback,
+  handleEquipInlineQuery,
+  handlePendingInput,
+  Button as EquipButton,
+} from "./equip/bot";
 
 dotenv.config();
 
@@ -881,7 +888,10 @@ app.post("/api/simulate-bot", async (req, res) => {
   }
 
   const responseObj = await processBotMessageWithOptions(text, chatId || "default", userId || 12345, username || "PlayerSimulator");
-  res.json(responseObj);
+  const buttons = responseObj.buttons ?? responseObj.keyboard
+    ?.flat()
+    .filter((b): b is { text: string; callback_data: string } => "callback_data" in b);
+  res.json({ reply: responseObj.reply, buttons });
 });
 
 // ----------------------------------------------------
@@ -892,17 +902,38 @@ async function processBotMessage(text: string, chatId: string | number, userId: 
   return resObj.reply;
 }
 
+interface BotResponse {
+  reply: string;
+  /** single row of buttons (legacy) */
+  buttons?: { text: string; callback_data: string }[];
+  /** full inline keyboard (rows of buttons) */
+  keyboard?: EquipButton[][];
+  /** edit the message the pressed button belongs to instead of sending a new one */
+  edit?: boolean;
+  /** popup text for answerCallbackQuery */
+  alert?: string;
+}
+
 async function processBotMessageWithOptions(
   text: string, 
   chatId: string | number,
   userId: number, 
   username: string
-): Promise<{ reply: string; buttons?: { text: string; callback_data: string }[] }> {
+): Promise<BotResponse> {
+  // Equipment stat calculator (ported from equip_bot)
+  const equipResponse =
+    handleEquipCallback(text.trim(), userId) ??
+    handleEquipCommand(text, userId) ??
+    handlePendingInput(text, userId);
+  if (equipResponse) {
+    return equipResponse;
+  }
+
   const cid = String(chatId);
   const state = getChatState(cid);
   const dbState = state; // Local alias so we don't have to rewrite internal dbState references
   const trimmed = text.trim();
-  const command = trimmed.split(/\s+/)[0].toLowerCase();
+  const command = trimmed.split(/\s+/)[0].toLowerCase().replace(/@\w+$/, "");
 
   // Language customization command triggers
   if (command === "/setlang_ru" || command === "/setlang ru") {
@@ -943,6 +974,10 @@ async function processBotMessageWithOptions(
 🔹 /reset - Сбросить все пулы очков и логи ходов.
 🔹 /help - Показать это меню помощи.
 
+🧮 <b>Калькулятор статов:</b>
+🔹 /equip - Меню калькулятора (экипировка, бафы, статы).
+🔹 /stats - Показать рассчитанные характеристики.
+
 👉 <b>Как отслеживать:</b>
 Просто перешли или вставь <b>боевой лог</b> прямо в этот чат!
 Бот автоматически:
@@ -965,6 +1000,10 @@ Welcome, fighter! I will help you track <b>Ability Points (AP)</b> automatically
 🔹 /status - Show current active Turn and player conditions.
 🔹 /reset - Reset all point pools and Turn logs.
 🔹 /help - Show this help menu.
+
+🧮 <b>Stat calculator (RU):</b>
+🔹 /equip - Calculator menu (equipment, buffs, stats).
+🔹 /stats - Show calculated character stats.
 
 👉 <b>How to track:</b>
 Just forward or paste the <b>combat log</b> directly into this chat!
@@ -1253,6 +1292,33 @@ Fallen Combatants: <b>${dead}</b>`
 let liveBotRunning = false;
 let liveBotOffset = 0;
 
+async function tg(token: string, method: string, body: any) {
+  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const json = await res.json().catch(() => ({})) as any;
+  if (!json.ok && !(json.description || "").includes("message is not modified")) {
+    console.error(`[TelegramBot] ${method} failed:`, json.description || res.status);
+  }
+  return json;
+}
+
+function toReplyMarkup(responseObj: BotResponse) {
+  if (responseObj.keyboard) {
+    return { inline_keyboard: responseObj.keyboard };
+  }
+  if (responseObj.buttons) {
+    return {
+      inline_keyboard: [
+        responseObj.buttons.map(b => ({ text: b.text, callback_data: b.callback_data }))
+      ]
+    };
+  }
+  return undefined;
+}
+
 async function runTelegramPollingBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
@@ -1274,81 +1340,10 @@ async function runTelegramPollingBot() {
       if (data.ok && data.result) {
         for (const update of data.result) {
           liveBotOffset = Math.max(liveBotOffset, update.update_id + 1);
-          
-          if (update.message) {
-            const msg = update.message;
-            const text = msg.text || "";
-            const chatId = msg.chat.id;
-            const fromUser = msg.from?.username || msg.from?.first_name || "TelegramUser";
-            const fromId = msg.from?.id || 0;
-
-            console.log(`[TelegramBot] message received from ${fromUser}: ${text.substring(0, 40)}...`);
-            
-            // Process message details
-            const responseObj = await processBotMessageWithOptions(text, chatId, fromId, fromUser);
-
-            // Send back simple response using Fetch
-            const sendUrl = `https://api.telegram.org/bot${token}/sendMessage`;
-            const sendBody: any = {
-              chat_id: chatId,
-              text: responseObj.reply,
-              parse_mode: "HTML"
-            };
-            if (responseObj.buttons) {
-              sendBody.reply_markup = {
-                inline_keyboard: [
-                  responseObj.buttons.map(b => ({
-                    text: b.text,
-                    callback_data: b.callback_data
-                  }))
-                ]
-              };
-            }
-
-            await fetch(sendUrl, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(sendBody)
-            });
-          } else if (update.callback_query) {
-            const cb = update.callback_query;
-            const dataCmd = cb.data || "";
-            const chatId = cb.message?.chat?.id;
-            const fromUser = cb.from?.username || cb.from?.first_name || "TelegramUser";
-            const fromId = cb.from?.id || 0;
-
-            if (chatId) {
-              const responseObj = await processBotMessageWithOptions(dataCmd, chatId, fromId, fromUser);
-              const sendUrl = `https://api.telegram.org/bot${token}/sendMessage`;
-              const sendBody: any = {
-                chat_id: chatId,
-                text: responseObj.reply,
-                parse_mode: "HTML"
-              };
-              if (responseObj.buttons) {
-                sendBody.reply_markup = {
-                  inline_keyboard: [
-                    responseObj.buttons.map(b => ({
-                      text: b.text,
-                      callback_data: b.callback_data
-                    }))
-                  ]
-                };
-              }
-              await fetch(sendUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(sendBody)
-              });
-            }
-
-            // answer callback query to remove telegram's button loading animation
-            const answerUrl = `https://api.telegram.org/bot${token}/answerCallbackQuery`;
-            await fetch(answerUrl, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ callback_query_id: cb.id })
-            }).catch(e => console.error("Error answering callback", e));
+          try {
+            await handleTelegramUpdate(token, update);
+          } catch (e) {
+            console.error("[TelegramBot] Failed to handle update", update.update_id, e);
           }
         }
       }
@@ -1356,6 +1351,72 @@ async function runTelegramPollingBot() {
       console.error("[TelegramBot] Polling Connection Issue. Retrying in 8s.", error);
       await new Promise(resolve => setTimeout(resolve, 8000));
     }
+  }
+}
+
+async function handleTelegramUpdate(token: string, update: any) {
+  if (update.message) {
+    const msg = update.message;
+    const text = msg.text || "";
+    if (!text) return;
+    const chatId = msg.chat.id;
+    const fromUser = msg.from?.username || msg.from?.first_name || "TelegramUser";
+    const fromId = msg.from?.id || 0;
+
+    console.log(`[TelegramBot] message received from ${fromUser}: ${text.substring(0, 40)}...`);
+
+    const responseObj = await processBotMessageWithOptions(text, chatId, fromId, fromUser);
+    await tg(token, "sendMessage", {
+      chat_id: chatId,
+      text: responseObj.reply,
+      parse_mode: "HTML",
+      reply_markup: toReplyMarkup(responseObj)
+    });
+  } else if (update.callback_query) {
+    const cb = update.callback_query;
+    const dataCmd = cb.data || "";
+    const chatId = cb.message?.chat?.id;
+    const messageId = cb.message?.message_id;
+    const fromUser = cb.from?.username || cb.from?.first_name || "TelegramUser";
+    const fromId = cb.from?.id || 0;
+
+    let alert: string | undefined;
+    if (chatId) {
+      const responseObj = await processBotMessageWithOptions(dataCmd, chatId, fromId, fromUser);
+      alert = responseObj.alert;
+      if (responseObj.edit && messageId) {
+        await tg(token, "editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: responseObj.reply,
+          parse_mode: "HTML",
+          reply_markup: toReplyMarkup(responseObj)
+        });
+      } else {
+        await tg(token, "sendMessage", {
+          chat_id: chatId,
+          text: responseObj.reply,
+          parse_mode: "HTML",
+          reply_markup: toReplyMarkup(responseObj)
+        });
+      }
+    }
+
+    // answer callback query to remove telegram's button loading animation
+    await tg(token, "answerCallbackQuery", {
+      callback_query_id: cb.id,
+      ...(alert ? { text: alert } : {})
+    }).catch(e => console.error("Error answering callback", e));
+  } else if (update.inline_query) {
+    const iq = update.inline_query;
+    const result = handleEquipInlineQuery(iq.query || "", Number(iq.offset) || 0);
+    await tg(token, "answerInlineQuery", {
+      inline_query_id: iq.id,
+      results: result?.results ?? [],
+      next_offset: result?.next_offset ?? "",
+      cache_time: 60,
+      is_personal: false
+    });
   }
 }
 
