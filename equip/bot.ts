@@ -2,6 +2,7 @@
 // All callback_data values start with "eq:" and stay under Telegram's 64-byte limit
 // (items are referenced by index, not by name).
 import fs from "fs";
+import type { PostgresStore } from "../storage/postgres";
 import path from "path";
 import {
   SLOTS, SLOT_INFO, Slot, EMPTY, ITEM_NAMES, RACES, RACE_BUTTONS,
@@ -34,7 +35,11 @@ function load() {
     console.error("[equip] failed to load profiles:", e);
   }
 }
+let equipmentStore: PostgresStore | undefined;
+export function configureEquipmentStore(store: PostgresStore) { equipmentStore = store; }
+
 function save() {
+  if (equipmentStore) return;
   try {
     fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
     fs.writeFileSync(DB_FILE, JSON.stringify(profiles, null, 2), "utf-8");
@@ -43,6 +48,8 @@ function save() {
   }
 }
 load();
+// Immutable import source: concurrent requests must not seed from uncommitted cache.
+const legacyProfiles = structuredClone(profiles);
 
 export function getProfile(userId: number | string): EquipProfile {
   const id = String(userId);
@@ -526,4 +533,26 @@ export function handleEquipInlineQuery(query: string, offset: number) {
   }));
   const next = offset + page.length;
   return { results, next_offset: next < names.length ? String(next) : "" };
+}
+
+
+/** Load, handle, and save one user's equipment interaction atomically. */
+export async function handleEquipMessage(text: string, userId: number | string, updateId?: number): Promise<EquipReply | null> {
+  const handle = () => handleEquipCallback(text.trim(), userId) ?? handleEquipCommand(text, userId) ?? handlePendingInput(text, userId);
+  if (!equipmentStore) return handle();
+  const id = String(userId);
+  const initial = { profile: structuredClone(legacyProfiles[id] ?? defaultProfile()), pending: null as Pending | null };
+  const snapshot = structuredClone(initial);
+  try {
+    return await equipmentStore.withState(id, initial, async state => {
+      profiles[id] = state.profile;
+      if (state.pending) pending.set(id, state.pending); else pending.delete(id);
+      const result = handle();
+      return { state: { profile: getProfile(id), pending: pending.get(id) ?? null }, result };
+    }, updateId);
+  } catch (error) {
+    profiles[id] = snapshot.profile;
+    if (snapshot.pending) pending.set(id, snapshot.pending); else pending.delete(id);
+    throw error;
+  }
 }

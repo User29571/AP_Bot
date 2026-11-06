@@ -4,12 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "test": "tsx tests/equip-search.ts",
+    "test": "node --import tsx tests/equip-search.ts && node --import tsx tests/storage-config.ts",
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:integration": "node --import tsx tests/postgres.ts && node --import tsx tests/equip-persistence.ts && node --import tsx tests/equip-rollback.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",
@@ -22,11 +23,15 @@
     "express": "^4.21.2",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
+    "pg": "8.16.3",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
+  },
+  "devDependencies": {
+    "@types/pg": "8.15.5"
   }
 }

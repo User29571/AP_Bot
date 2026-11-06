@@ -1,18 +1,25 @@
 import express from "express";
+import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { PostgresStore, type Leader } from "./storage/postgres";
 import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { Player, BattleLogEntry, Settings, DatabaseState } from "./src/types";
 import {
-  handleEquipCommand,
-  handleEquipCallback,
+  handleEquipMessage,
+  configureEquipmentStore,
   handleEquipInlineQuery,
-  handlePendingInput,
   Button as EquipButton,
 } from "./equip/bot";
 
 dotenv.config();
+const database = process.env.DATABASE_URL ? new PostgresStore(
+  process.env.DATABASE_URL,
+  createHash('sha256').update(process.env.TELEGRAM_BOT_TOKEN || 'simulator').digest('hex')
+) : undefined;
+if (database) configureEquipmentStore(database);
 
 const app = express();
 const PORT = 3000;
@@ -887,11 +894,15 @@ app.post("/api/simulate-bot", async (req, res) => {
     return res.status(400).json({ error: "No text message provided" });
   }
 
-  const responseObj = await processBotMessageWithOptions(text, chatId || "default", userId || 12345, username || "PlayerSimulator");
-  const buttons = responseObj.buttons ?? responseObj.keyboard
-    ?.flat()
-    .filter((b): b is { text: string; callback_data: string } => "callback_data" in b);
-  res.json({ reply: responseObj.reply, buttons });
+  try {
+    const responseObj = await processBotMessageWithOptions(text, chatId || "default", userId || 12345, username || "PlayerSimulator");
+    const buttons = responseObj.buttons ?? responseObj.keyboard
+      ?.flat()
+      .filter((b): b is { text: string; callback_data: string } => "callback_data" in b);
+    res.json({ reply: responseObj.reply, buttons });
+  } catch {
+    res.status(503).json({ error: "Equipment storage is temporarily unavailable. Please retry." });
+  }
 });
 
 // ----------------------------------------------------
@@ -918,13 +929,11 @@ async function processBotMessageWithOptions(
   text: string, 
   chatId: string | number,
   userId: number, 
-  username: string
+  username: string,
+  updateId?: number
 ): Promise<BotResponse> {
   // Equipment stat calculator (ported from equip_bot)
-  const equipResponse =
-    handleEquipCallback(text.trim(), userId) ??
-    handleEquipCommand(text, userId) ??
-    handlePendingInput(text, userId);
+  const equipResponse = await handleEquipMessage(text, userId, updateId);
   if (equipResponse) {
     return equipResponse;
   }
@@ -1291,12 +1300,15 @@ Fallen Combatants: <b>${dead}</b>`
 // ----------------------------------------------------
 let liveBotRunning = false;
 let liveBotOffset = 0;
+const shutdown = new AbortController();
+let pollingSignal: AbortSignal = shutdown.signal;
 
 async function tg(token: string, method: string, body: any) {
   const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: pollingSignal
   });
   const json = await res.json().catch(() => ({})) as any;
   if (!json.ok && !(json.description || "").includes("message is not modified")) {
@@ -1329,28 +1341,46 @@ async function runTelegramPollingBot() {
   console.log("Starting real Telegram Long Polling server connecting to @BotFather...");
   liveBotRunning = true;
 
-  while (liveBotRunning) {
-    try {
-      const url = `https://api.telegram.org/bot${token}/getUpdates?offset=${liveBotOffset}&timeout=20`;
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`HTTP Error status ${response.status}`);
-      }
-      const data = await response.json() as any;
-      if (data.ok && data.result) {
-        for (const update of data.result) {
-          liveBotOffset = Math.max(liveBotOffset, update.update_id + 1);
-          try {
-            await handleTelegramUpdate(token, update);
-          } catch (e) {
-            console.error("[TelegramBot] Failed to handle update", update.update_id, e);
+  let leader: Leader | null = null;
+  try {
+    while (liveBotRunning) {
+      try {
+        if (database && !leader) {
+          leader = await database.tryLeader();
+          if (!leader) {
+            console.log('[TelegramBot] Standby: another instance owns the polling lock');
+            await delay(5000, undefined, { signal: shutdown.signal });
+            continue;
           }
+          liveBotOffset = await database.loadOffset();
+          console.log('[TelegramBot] Polling lock acquired');
         }
+        pollingSignal = leader ? AbortSignal.any([shutdown.signal, leader.signal]) : shutdown.signal;
+        pollingSignal.throwIfAborted();
+        const response = await fetch(
+          `https://api.telegram.org/bot${token}/getUpdates?offset=${liveBotOffset}&timeout=20`,
+          { signal: pollingSignal }
+        );
+        if (!response.ok) throw new Error(`Telegram HTTP ${response.status}`);
+        const data = await response.json() as any;
+        if (!data.ok) throw new Error('Telegram getUpdates rejected');
+        for (const update of data.result || []) {
+          pollingSignal.throwIfAborted();
+          // Revalidate the lock-owning session before processing fetched updates.
+          if (leader) await leader.client.query('select 1');
+          await handleTelegramUpdate(token, update);
+          liveBotOffset = Math.max(liveBotOffset, update.update_id + 1);
+          if (database) await database.saveOffset(liveBotOffset);
+        }
+      } catch {
+        if (leader) { await leader.release().catch(() => {}); leader = null; }
+        if (shutdown.signal.aborted) break;
+        console.error('[TelegramBot] Polling interrupted; retrying in 8s');
+        await delay(8000, undefined, { signal: shutdown.signal }).catch(() => {});
       }
-    } catch (error) {
-      console.error("[TelegramBot] Polling Connection Issue. Retrying in 8s.", error);
-      await new Promise(resolve => setTimeout(resolve, 8000));
     }
+  } finally {
+    if (leader) await leader.release().catch(() => {});
   }
 }
 
@@ -1365,7 +1395,7 @@ async function handleTelegramUpdate(token: string, update: any) {
 
     console.log(`[TelegramBot] message received from ${fromUser}: ${text.substring(0, 40)}...`);
 
-    const responseObj = await processBotMessageWithOptions(text, chatId, fromId, fromUser);
+    const responseObj = await processBotMessageWithOptions(text, chatId, fromId, fromUser, update.update_id);
     await tg(token, "sendMessage", {
       chat_id: chatId,
       text: responseObj.reply,
@@ -1382,7 +1412,7 @@ async function handleTelegramUpdate(token: string, update: any) {
 
     let alert: string | undefined;
     if (chatId) {
-      const responseObj = await processBotMessageWithOptions(dataCmd, chatId, fromId, fromUser);
+      const responseObj = await processBotMessageWithOptions(dataCmd, chatId, fromId, fromUser, update.update_id);
       alert = responseObj.alert;
       if (responseObj.edit && messageId) {
         await tg(token, "editMessageText", {
@@ -1421,7 +1451,19 @@ async function handleTelegramUpdate(token: string, update: any) {
 }
 
 // Spark up Real bot polling in background safely
-runTelegramPollingBot();
+const pollingTask = runTelegramPollingBot();
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.once(signal, () => {
+    liveBotRunning = false;
+    shutdown.abort();
+    const deadline = setTimeout(() => process.exit(1), 10000);
+    deadline.unref();
+    void pollingTask.finally(async () => {
+      await database?.close();
+      process.exit(0);
+    });
+  });
+}
 
 // ----------------------------------------------------
 // Front-End SPA Build Asset Serving Setup
@@ -1448,3 +1490,4 @@ async function initializeViteOrSPA() {
 }
 
 initializeViteOrSPA();
+
