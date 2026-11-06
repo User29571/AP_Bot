@@ -1,0 +1,50 @@
+{
+    "Человек": {
+        "hp": 200,
+        "atk": 60,
+        "def": 20,
+        "krit": 5,
+        "sk": 0,
+        "pred": 3,
+        "yvorot": 5,
+        "kontratk": 0,
+        "tochn": 3,
+        "exp": 0,
+        "gold": 0,
+        "drop": 0,
+        "skc": 0,
+        "speed": 0
+    },
+    "Эльф": {
+        "hp": 180,
+        "atk": 66,
+        "def": 18,
+        "krit": 4,
+        "sk": 0,
+        "pred": 4,
+        "yvorot": 6,
+        "kontratk": 0,
+        "tochn": 2,
+        "exp": 0,
+        "gold": 0,
+        "drop": 0,
+        "skc": 0,
+        "speed": 0
+    },
+    "Орк": {
+        "hp": 220,
+        "atk": 54,
+        "def": 22,
+        "krit": 6,
+        "sk": 0,
+        "pred": 2,
+        "yvorot": 4,
+        "kontratk": 0,
+        "tochn": 4,
+        "exp": 0,
+        "gold": 0,
+        "drop": 0,
+        "skc": 0,
+        "speed": 0
+    }
+}
