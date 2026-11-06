@@ -1,23 +1,22 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Epsilon War AP Tracker
 
-# Run and deploy your AI Studio app
+Telegram bot and web dashboard for tracking ability points and calculating equipment stats.
 
-This contains everything you need to run your app locally.
+## Run locally
 
-View your app in AI Studio: https://ai.studio/apps/b4008525-0293-45d9-be08-e6b17169535e
+**Prerequisites:** Node.js and npm.
 
-## Run Locally
+1. Install dependencies: `npm ci`.
+2. Copy `.env.example` to `.env` and set `TELEGRAM_BOT_TOKEN` to connect your bot. Leave it empty to use the web simulator.
+3. Run `npm run dev` and open `http://localhost:3000`.
 
-**Prerequisites:**  Node.js
+## Deploy with Node.js
 
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+1. Run `npm ci` and `npm run build`.
+2. Configure `TELEGRAM_BOT_TOKEN` and `DASHBOARD_PASSWORD` in the deployment environment.
+3. Start the server with `NODE_ENV=production npm start`. The server listens on port 3000.
+4. Keep the `equip/data/` directory alongside `dist/` and persist the root `data/` directory for battle and equipment profiles. Start the server from the repository root.
+5. Run one bot instance per token because Telegram updates are received through long polling.
 
 ## Калькулятор статов (`/equip`)
 
@@ -30,3 +29,4 @@ View your app in AI Studio: https://ai.studio/apps/b4008525-0293-45d9-be08-e6b17
 
 Код: `equip/calculator.ts` (формулы и данные), `equip/bot.ts` (меню Telegram), предметы в `equip/data/*.json`.
 Профили игроков хранятся в `data/equip.json` (по Telegram user id).
+
