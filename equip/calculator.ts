@@ -69,9 +69,6 @@ const GRADE_IV_STAT_INCREASES: Record<string, Partial<Record<StatKey, number>>> 
 // ---------- Buffs catalogue ----------
 // Toggles that are mutually exclusive in pairs (e.g. fish dish I vs III).
 export const TOGGLE_PAIRS: Record<string, string> = {
-  fish_eat_1: "fish_eat_3", fish_eat_3: "fish_eat_1",
-  meat_eat_1: "meat_eat_3", meat_eat_3: "meat_eat_1",
-  akvel_eat_1: "akvel_eat_3", akvel_eat_3: "akvel_eat_1",
   tree: "snowman", snowman: "tree",
   eye_tal: "eye_tal_4", eye_tal_4: "eye_tal",
   pred_tal: "pred_tal_4", pred_tal_4: "pred_tal",
@@ -79,11 +76,14 @@ export const TOGGLE_PAIRS: Record<string, string> = {
 
 export const TOGGLES: Record<string, string> = {
   fish_eat_1: "🍲 Блюдо из рыбы [I] +50❤️",
-  fish_eat_3: "🍲 Блюдо из рыбы [III] +100❤️",
+  fish_eat_3: "🍲 Блюдо из рыбы [III] +150❤️",
+  fish_eat_4_plus: "🍲 Блюдо из рыбы [IV+] +300❤️",
   meat_eat_1: "🥘 Блюдо из мяса [I] +10🗡",
-  meat_eat_3: "🥘 Блюдо из мяса [III] +20🗡",
+  meat_eat_3: "🥘 Блюдо из мяса [III] +30🗡",
+  meat_eat_4_plus: "🥘 Блюдо из мяса [IV+] +60🗡",
   akvel_eat_1: "🍛 Аквельский обед [I] +15🗡 +75❤️",
-  akvel_eat_3: "🍛 Аквельский обед [III] +25🗡 +125❤️",
+  akvel_eat_3: "🍛 Аквельский обед [III] +45🗡 +225❤️",
+  akvel_eat_4_plus: "🍛 Аквельский обед [IV+] +100🗡 +500❤️",
   garlic_eat: "🍲 Чесночная похлебка [I] +4%🎯",
   carrot_eat: "🥮 Пастуший хлеб [I] +4%🥊",
   pepper_eat: "🥘 Острое лечо [I] +4%👁",
@@ -103,9 +103,9 @@ export const TOGGLES: Record<string, string> = {
 };
 
 export const TOGGLE_GROUPS: Record<string, string[]> = {
-  fish: ["fish_eat_1", "fish_eat_3"],
-  meat: ["meat_eat_1", "meat_eat_3"],
-  akvel: ["akvel_eat_1", "akvel_eat_3"],
+  fish: ["fish_eat_1", "fish_eat_3", "fish_eat_4_plus"],
+  meat: ["meat_eat_1", "meat_eat_3", "meat_eat_4_plus"],
+  akvel: ["akvel_eat_1", "akvel_eat_3", "akvel_eat_4_plus"],
   food: ["garlic_eat", "carrot_eat", "pepper_eat", "onion_eat"],
   talents: ["eye_tal", "eye_tal_4", "arm_tal", "hp_tal", "pred_tal", "pred_tal_4", "atk_tal"],
   other: ["kompl", "karma", "hell_tikva", "snowman", "tree"],
@@ -263,6 +263,12 @@ export function toggleBuff(p: EquipProfile, key: string) {
   p.toggles[key] = next;
   const opposite = TOGGLE_PAIRS[key];
   if (opposite && next) p.toggles[opposite] = false;
+  if (next) {
+    const foodRanks = [TOGGLE_GROUPS.fish, TOGGLE_GROUPS.meat, TOGGLE_GROUPS.akvel].find(ranks => ranks.includes(key));
+    for (const rank of foodRanks ?? []) {
+      if (rank !== key) p.toggles[rank] = false;
+    }
+  }
 }
 
 // Enchant bonus percent per level (+1 .. +10)
@@ -351,12 +357,15 @@ export function calculate(p: EquipProfile): Stats {
   if (t.carrot_eat) s.crit_chance *= 1.04;
   if (t.pepper_eat) s.prediction *= 1.04;
   if (t.onion_eat) s.dodge *= 1.04;
-  if (t.fish_eat_1) s.health += 50;
-  if (t.fish_eat_3) s.health += 100;
-  if (t.meat_eat_1) s.attack += 10;
-  if (t.meat_eat_3) s.attack += 20;
-  if (t.akvel_eat_1) { s.attack += 15; s.health += 75; }
-  if (t.akvel_eat_3) { s.attack += 25; s.health += 125; }
+  if (t.fish_eat_4_plus) s.health += 300;
+  else if (t.fish_eat_3) s.health += 150;
+  else if (t.fish_eat_1) s.health += 50;
+  if (t.meat_eat_4_plus) s.attack += 60;
+  else if (t.meat_eat_3) s.attack += 30;
+  else if (t.meat_eat_1) s.attack += 10;
+  if (t.akvel_eat_4_plus) { s.attack += 100; s.health += 500; }
+  else if (t.akvel_eat_3) { s.attack += 45; s.health += 225; }
+  else if (t.akvel_eat_1) { s.attack += 15; s.health += 75; }
   if (t.hell_tikva) { s.attack += 20; s.exp_bonus += 60; }
   if (t.kompl) s.health += 14;
   if (t.karma) s.health -= 10;
