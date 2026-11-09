@@ -60,6 +60,12 @@ const STAT_MAPPING: Record<string, StatKey> = {
   exp: "exp_bonus", gold: "gold_bonus", drop: "drop_bonus", skc: "combo_power", speed: "speed",
 };
 
+const GRADE_IV_STAT_INCREASES: Record<string, Partial<Record<StatKey, number>>> = {
+  "Гладиатор": { prediction: 4, health: 3 },
+  "Целитель": { accuracy: 2, prediction: 3, attack: 4 },
+  "Инквизитор": { accuracy: 2, prediction: 3, attack: 3 },
+};
+
 // ---------- Buffs catalogue ----------
 // Toggles that are mutually exclusive in pairs (e.g. fish dish I vs III).
 export const TOGGLE_PAIRS: Record<string, string> = {
@@ -67,6 +73,8 @@ export const TOGGLE_PAIRS: Record<string, string> = {
   meat_eat_1: "meat_eat_3", meat_eat_3: "meat_eat_1",
   akvel_eat_1: "akvel_eat_3", akvel_eat_3: "akvel_eat_1",
   tree: "snowman", snowman: "tree",
+  eye_tal: "eye_tal_4", eye_tal_4: "eye_tal",
+  pred_tal: "pred_tal_4", pred_tal_4: "pred_tal",
 };
 
 export const TOGGLES: Record<string, string> = {
@@ -81,9 +89,11 @@ export const TOGGLES: Record<string, string> = {
   pepper_eat: "🥘 Острое лечо [I] +4%👁",
   onion_eat: "🍛 Луковый суп [I] +4%⚡️",
   eye_tal: "💟 Орлиный глаз +50🎯",
+  eye_tal_4: "💟 Орлиный глаз [IV] +150🎯",
   arm_tal: "💟 Блестящие латы +10%🔰",
   hp_tal: "💟 Закалка +10%❤️",
   pred_tal: "💟 Оракул +50👁",
+  pred_tal_4: "💟 Оракул [IV] +150👁",
   atk_tal: "💟 Потрошитель +5%🗡",
   kompl: "💝 Комплимент +14❤️",
   karma: "💩 Карма -10❤️",
@@ -97,7 +107,7 @@ export const TOGGLE_GROUPS: Record<string, string[]> = {
   meat: ["meat_eat_1", "meat_eat_3"],
   akvel: ["akvel_eat_1", "akvel_eat_3"],
   food: ["garlic_eat", "carrot_eat", "pepper_eat", "onion_eat"],
-  talents: ["eye_tal", "arm_tal", "hp_tal", "pred_tal", "atk_tal"],
+  talents: ["eye_tal", "eye_tal_4", "arm_tal", "hp_tal", "pred_tal", "pred_tal_4", "atk_tal"],
   other: ["kompl", "karma", "hell_tikva", "snowman", "tree"],
 };
 
@@ -116,6 +126,12 @@ export const PARAMS: Record<string, string> = {
   lovk: "💫 Ловкость",
   intyat: "🧿 Интуиция",
 };
+
+export const PARAMETER_POINT_BUDGET = 222;
+
+export function parameterPointCost(level: number): number {
+  return Math.min(level, 80) + 2 * Math.max(0, Math.min(level, 110) - 80) + 3 * Math.max(0, level - 110);
+}
 
 export const RANKS: { id: string; name: string; desc: string; bonus: Partial<Stats> }[] = [
   { id: "novobranec", name: "Новобранец", desc: "от 0 до 50 🏵", bonus: {} },
@@ -266,10 +282,10 @@ export function activeSets(p: EquipProfile): string[] {
     .map(([name]) => name);
 }
 
-function addRaw(stats: Stats, raw: RawItem, transform: (v: number) => number = v => v) {
+function addRaw(stats: Stats, raw: RawItem, transform: (v: number, stat: StatKey) => number = v => v) {
   for (const [k, v] of Object.entries(raw)) {
     const key = STAT_MAPPING[k];
-    if (key && typeof v === "number") stats[key] += transform(v);
+    if (key && typeof v === "number") stats[key] += transform(v, key);
   }
 }
 
@@ -297,8 +313,12 @@ export function calculate(p: EquipProfile): Stats {
     if (item === EMPTY) continue;
     const raw = ITEMS[slot][item];
     if (!raw) continue;
-    addRaw(s, raw);
-    addRaw(s, raw, v => enchantBonus(v, enchant));
+    const increases = item.includes("[IV]") && typeof raw.class === "string"
+      ? GRADE_IV_STAT_INCREASES[raw.class]
+      : undefined;
+    const boosted = (value: number, stat: StatKey) => value * (100 + (increases?.[stat] ?? 0)) / 100;
+    addRaw(s, raw, boosted);
+    addRaw(s, raw, (value, stat) => enchantBonus(boosted(value, stat), enchant));
   }
 
   // Set bonuses
@@ -321,8 +341,10 @@ export function calculate(p: EquipProfile): Stats {
   if (t.arm_tal) s.defense *= 1.10;
   if (t.hp_tal) s.health *= 1.10;
   if (t.atk_tal) s.attack *= 1.05;
-  if (t.eye_tal) s.accuracy += 50;
-  if (t.pred_tal) s.prediction += 50;
+  if (t.eye_tal_4) s.accuracy += 150;
+  else if (t.eye_tal) s.accuracy += 50;
+  if (t.pred_tal_4) s.prediction += 150;
+  else if (t.pred_tal) s.prediction += 50;
 
   // 6. Food
   if (t.garlic_eat) s.accuracy *= 1.04;
@@ -356,3 +378,4 @@ export function calculate(p: EquipProfile): Stats {
   for (const k of STAT_KEYS) s[k] = Math.trunc(s[k]);
   return s;
 }
+

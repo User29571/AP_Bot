@@ -6,7 +6,7 @@ import type { PostgresStore } from "../storage/postgres";
 import path from "path";
 import {
   SLOTS, SLOT_INFO, Slot, EMPTY, ITEM_NAMES, RACES, RACE_BUTTONS,
-  TOGGLES, TOGGLE_GROUPS, CLAN_BUFFS, CLAN_BUFF_MAX, PARAMS, RANKS,
+  TOGGLES, TOGGLE_GROUPS, CLAN_BUFFS, CLAN_BUFF_MAX, PARAMS, PARAMETER_POINT_BUDGET, parameterPointCost, RANKS,
   CHAOS_SLOTS, ChaosSlot, CHAOS_STONES, GRADES, formatGrade,
   EquipProfile, defaultProfile, defaultChaos, toggleBuff, calculate, activeSets,
 } from "./calculator";
@@ -248,8 +248,10 @@ function clanBuffScreen(p: EquipProfile, key: string): EquipReply {
 }
 
 function paramsScreen(p: EquipProfile): EquipReply {
+  const spent = Object.keys(PARAMS).reduce((total, key) => total + parameterPointCost(p.params[key] || 0), 0);
   const text = "🧬 <b>Текущие параметры героя:</b>\n\n" +
-    Object.entries(PARAMS).map(([k, l]) => `${l}: ${p.params[k] || 0}`).join("\n");
+    Object.entries(PARAMS).map(([k, l]) => `${l}: ${p.params[k] || 0}`).join("\n") +
+    `\n\nПотрачено очков: ${spent} из ${PARAMETER_POINT_BUDGET}`;
   const rows = Object.entries(PARAMS).map(([k, l]) => [cb(l, `eq:param:${k}`)]);
   rows.push([cb("⬅️ Назад", "eq:buffs")]);
   return { reply: text, keyboard: rows };
@@ -460,7 +462,7 @@ export function handleEquipCallback(data: string, userId: number | string): Equi
       const key = parts[2];
       if (!PARAMS[key]) return null;
       pending.set(id, { kind: "param", key });
-      return done(inputPrompt(`${PARAMS[key]}\n\nОтправьте новое значение (сейчас: ${p.params[key] || 0}).\nПодсказка: максимум в игре 102 параметра.`, "params"));
+      return done(inputPrompt(`${PARAMS[key]}\n\nОтправьте новое значение (сейчас: ${p.params[key] || 0}).\nПодсказка: в игре доступно ${PARAMETER_POINT_BUDGET} очка параметров.\nЦена повышения на один уровень: до 80 включительно — 1 очко, с 81 по 110 — 2 очка, с 111 — 3 очка.`, "params"));
     }
     case "ranks": return done(ranksScreen(p));
     case "rank": {
